@@ -21,6 +21,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/pkg/errors"
@@ -40,6 +41,7 @@ const (
 	secretsEndpointAll = "/api/v1/secrets"
 	eventsEndpoint     = "/api/v1/namespaces/%s/events"
 
+	labelNamespace      = "stable.k8s.psg.io/kcm"
 	annotationNamespace = "stable.k8s.psg.io/kcm"
 )
 
@@ -163,11 +165,17 @@ func (u *ACMEUserData) GetPrivateKey() crypto.PrivateKey {
 	return privateKey
 }
 
-func (c *ACMECertData) ToSecret() *v1.Secret {
+func (c *ACMECertData) ToSecret(class string) *v1.Secret {
 	var metadata v1.ObjectMeta
-	metadata.Labels = map[string]string{"domain": c.DomainName}
-	metadata.Annotations = map[string]string{
-		annotationNamespace: "true",
+	metadata.Labels = map[string]string{
+		"domain":       c.DomainName,
+		labelNamespace: class,
+	}
+	// The "true" annotation is deprecated when a class label is used
+	if class == "" {
+		metadata.Annotations = map[string]string{
+			annotationNamespace: "true",
+		}
 	}
 
 	data := make(map[string][]byte)
@@ -478,4 +486,15 @@ func monitorIngressEvents(endpoint string) (<-chan IngressEvent, <-chan error) {
 
 func namespacedEndpoint(endpoint string, namespace string) string {
 	return fmt.Sprintf(endpoint, namespace)
+}
+
+func addURLArgument(urlString string, key string, value string) (string, error) {
+	u, err := url.Parse(urlString)
+	if err != nil {
+		return "", errors.Wrapf(err, "Error parsing URL: %v", err)
+	}
+	q := u.Query()
+	q.Set(key, value)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }

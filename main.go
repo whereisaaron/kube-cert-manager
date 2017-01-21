@@ -50,13 +50,19 @@ func main() {
 		certSecretPrefix string
 		dataDir          string
 		namespaces       []string
+		class            string
+		defaultProvider  string
+		defaultEmail     string
 	)
 
 	flag.StringVar(&acmeURL, "acme-url", "", "The URL to the acme directory to use")
 	flag.StringVar(&certSecretPrefix, "cert-secret-prefix", "", "The prefix to use for certificate secrets")
-	flag.IntVar(&syncInterval, "sync-interval", 30, "Sync interval in seconds.")
-	flag.StringVar(&dataDir, "data-dir", "/var/lib/cert-manager", "Data directory path.")
+	flag.IntVar(&syncInterval, "sync-interval", 30, "Sync interval in seconds")
+	flag.StringVar(&dataDir, "data-dir", "/var/lib/cert-manager", "Data directory path")
 	flag.Var((*listFlag)(&namespaces), "namespaces", "List of namespaces to monitor. The empty list means all namespaces")
+	flag.StringVar(&class, "class", "", "Class label for resources managed by this certificate manager")
+	flag.StringVar(&defaultProvider, "default-provider", "", "Default handler to handle ACME challenges")
+	flag.StringVar(&defaultEmail, "default-email", "", "Default email address for ACME registrations")
 	flag.Parse()
 
 	if acmeURL == "" {
@@ -91,7 +97,7 @@ func main() {
 	log.Println("Starting Kubernetes Certificate Controller...")
 
 	// Create the processor
-	p := NewCertProcessor(acmeURL, certSecretPrefix, namespaces, db)
+	p := NewCertProcessor(acmeURL, certSecretPrefix, namespaces, class, defaultProvider, defaultEmail, db)
 
 	// Asynchronously start watching and refreshing certs
 	wg := sync.WaitGroup{}
