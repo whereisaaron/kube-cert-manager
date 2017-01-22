@@ -165,14 +165,20 @@ func (u *ACMEUserData) GetPrivateKey() crypto.PrivateKey {
 	return privateKey
 }
 
+// ToSecret creates a Kubernetes Secret from an ACME Certificate
 func (c *ACMECertData) ToSecret(class string) *v1.Secret {
 	var metadata v1.ObjectMeta
-	metadata.Labels = map[string]string{
-		"domain":       c.DomainName,
-		labelNamespace: class,
-	}
+
 	// The "true" annotation is deprecated when a class label is used
-	if class == "" {
+	if class != "" {
+		metadata.Labels = map[string]string{
+			labelNamespace + "domain": c.DomainName,
+			labelNamespace + ".class": class,
+		}
+	} else {
+		metadata.Labels = map[string]string{
+			labelNamespace + "domain": c.DomainName,
+		}
 		metadata.Annotations = map[string]string{
 			annotationNamespace: "true",
 		}
@@ -197,7 +203,7 @@ func NewACMECertDataFromSecret(s *v1.Secret) (ACMECertData, error) {
 	var acmeCertData ACMECertData
 	var ok bool
 
-	acmeCertData.DomainName = s.Labels["domain"]
+	acmeCertData.DomainName = getDomainLabel(s)
 	acmeCertData.Cert, ok = s.Data["tls.crt"]
 	if !ok {
 		return acmeCertData, errors.Errorf("Could not find key tls.crt in secret %v", s.Name)
@@ -394,7 +400,10 @@ func monitorEvents(endpoint string) (<-chan WatchEvent, <-chan error) {
 	go func() {
 		resourceVersion := "0"
 		for {
-			resp, err := http.Get(apiHost + endpoint + "?watch=true&resourceVersion=" + resourceVersion)
+			watchURL := apiHost + endpoint
+			watchURL, _ = addURLArgument(watchURL, "watch", "true")
+			watchURL, _ = addURLArgument(watchURL, "resourceVersion", resourceVersion)
+			resp, err := http.Get(watchURL)
 			if err != nil {
 				errc <- err
 				time.Sleep(5 * time.Second)
@@ -497,4 +506,15 @@ func addURLArgument(urlString string, key string, value string) (string, error) 
 	q.Set(key, value)
 	u.RawQuery = q.Encode()
 	return u.String(), nil
+}
+
+func getDomainLabel(s *v1.Secret) string {
+	domain := s.Labels[labelNamespace+".domain"]
+	if domain == "" {
+		// deprecated plain label
+		// check for it in case people have the plain label in ecrets when upgrading
+		// will be updated to the prefixed label when the Secret is next updated
+		domain = s.Labels["domain"]
+	}
+	return domain
 }
