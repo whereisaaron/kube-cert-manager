@@ -105,13 +105,17 @@ func main() {
 
 	if len(p.namespaces) == 0 {
 		wg.Add(1)
-		go p.watchKubernetesEvents(certEndpointAll, ingressEndpointAll, &wg, doneChan)
+		go p.watchKubernetesEvents(
+			addLabelSelector(p, certEndpointAll),
+			addLabelSelector(p, ingressEndpointAll),
+			&wg,
+			doneChan)
 	} else {
 		for _, namespace := range p.namespaces {
 			wg.Add(1)
 			go p.watchKubernetesEvents(
-				namespacedEndpoint(certEndpoint, namespace),
-				namespacedEndpoint(ingressEndpoint, namespace),
+				addLabelSelector(p, namespacedEndpoint(certEndpoint, namespace)),
+				addLabelSelector(p, namespacedEndpoint(ingressEndpoint, namespace)),
 				&wg,
 				doneChan,
 			)

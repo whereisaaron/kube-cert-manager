@@ -168,17 +168,13 @@ func (p *CertProcessor) getSecrets() ([]v1.Secret, error) {
 	var secrets []v1.Secret
 	if len(p.namespaces) == 0 {
 		var err error
-		apiCall, err := addLabelSelector(p, secretsEndpointAll)
-		if err != nil {
-			return nil, errors.Wrap(err, "Error creating API URL for secret list")
-		}
-		secrets, err = getSecrets(apiCall)
+		secrets, err = getSecrets(addLabelSelector(p, secretsEndpointAll))
 		if err != nil {
 			return nil, errors.Wrap(err, "Error while fetching secret list")
 		}
 	} else {
 		for _, namespace := range p.namespaces {
-			s, err := getSecrets(namespacedEndpoint(secretsEndpoint, namespace))
+			s, err := getSecrets(addLabelSelector(p, namespacedEndpoint(secretsEndpoint, namespace)))
 			if err != nil {
 				return nil, errors.Wrap(err, "Error while fetching secret list")
 			}
@@ -192,21 +188,13 @@ func (p *CertProcessor) getCertificates() ([]Certificate, error) {
 	var certificates []Certificate
 	if len(p.namespaces) == 0 {
 		var err error
-		apiCall, err := addLabelSelector(p, certEndpointAll)
-		if err != nil {
-			return nil, errors.Wrap(err, "Error creating API URL for certificate list")
-		}
-		certificates, err = getCertificates(apiCall)
+		certificates, err = getCertificates(addLabelSelector(p, certEndpointAll))
 		if err != nil {
 			return nil, errors.Wrap(err, "Error while fetching certificate list")
 		}
 	} else {
 		for _, namespace := range p.namespaces {
-			apiCall, err := addLabelSelector(p, namespacedEndpoint(certEndpoint, namespace))
-			if err != nil {
-				return nil, errors.Wrap(err, "Error creating API URL for certificate list")
-			}
-			certs, err := getCertificates(apiCall)
+			certs, err := getCertificates(addLabelSelector(p, namespacedEndpoint(certEndpoint, namespace)))
 			if err != nil {
 				return nil, errors.Wrap(err, "Error while fetching certificate list")
 			}
@@ -220,21 +208,16 @@ func (p *CertProcessor) getIngresses() ([]v1beta1.Ingress, error) {
 	var ingresses []v1beta1.Ingress
 	if len(p.namespaces) == 0 {
 		var err error
-		apiCall, err := addLabelSelector(p, ingressEndpointAll)
 		if err != nil {
 			return nil, errors.Wrap(err, "Error creating API URL for ingress list")
 		}
-		ingresses, err = getIngresses(apiCall)
+		ingresses, err = getIngresses(addLabelSelector(p, ingressEndpointAll))
 		if err != nil {
 			return nil, errors.Wrap(err, "Error while fetching ingress list")
 		}
 	} else {
 		for _, namespace := range p.namespaces {
-			apiCall, err := addLabelSelector(p, namespacedEndpoint(ingressEndpoint, namespace))
-			if err != nil {
-				return nil, errors.Wrap(err, "Error creating API URL for ingress list")
-			}
-			igs, err := getIngresses(apiCall)
+			igs, err := getIngresses(addLabelSelector(p, namespacedEndpoint(ingressEndpoint, namespace)))
 			if err != nil {
 				return nil, errors.Wrap(err, "Error while fetching ingress list")
 			}
@@ -359,7 +342,7 @@ func (p *CertProcessor) processCertificate(cert Certificate) (processed bool, er
 	}
 
 	// If a cert exists, check its expiry
-	if s != nil && s.Labels["domain"] == cert.Spec.Domain {
+	if s != nil && getDomainLabel(s) == cert.Spec.Domain {
 		acmeCert, err = NewACMECertDataFromSecret(s)
 		if err != nil {
 			return false, errors.Wrapf(err, "Error while decoding acme certificate from secret for existing domain %v", cert.Spec.Domain)
@@ -392,15 +375,19 @@ func (p *CertProcessor) processCertificate(cert Certificate) (processed bool, er
 		return false, errors.Wrapf(err, "Error while running bolt view transaction for domain %v", cert.Spec.Domain)
 	}
 
+	provider := valueOrDefault(cert.Spec.Provider, p.defaultProvider)
+	email := valueOrDefault(cert.Spec.Email, p.defaultEmail)
+
 	// Handle user information
 	if userInfoRaw != nil { // Use existing user
 		if err := json.Unmarshal(userInfoRaw, &acmeUserInfo); err != nil {
 			return false, errors.Wrapf(err, "Error while unmarshalling user info for %v", cert.Spec.Domain)
 		}
 
-		acmeClient, acmeClientMutex, err = p.newACMEClient(&acmeUserInfo, cert.Spec.Provider)
+		log.Printf("Creating ACME client for %v provider for %v", provider, cert.Spec.Domain)
+		acmeClient, acmeClientMutex, err = p.newACMEClient(&acmeUserInfo, provider)
 		if err != nil {
-			return false, errors.Wrapf(err, "Error while creating ACME client for %v", cert.Spec.Domain)
+			return false, errors.Wrapf(err, "Error while creating ACME client for %v provider for %v", provider, cert.Spec.Domain)
 		}
 
 		// Some acme providers require locking, if the mutex is specified, lock it
@@ -414,13 +401,14 @@ func (p *CertProcessor) processCertificate(cert Certificate) (processed bool, er
 			return false, errors.Wrapf(err, "Error while generating rsa key for new user for domain %v", cert.Spec.Domain)
 		}
 
-		acmeUserInfo.Email = cert.Spec.Email
+		acmeUserInfo.Email = email
 		acmeUserInfo.Key = pem.EncodeToMemory(&pem.Block{
 			Type:  "RSA PRIVATE KEY",
 			Bytes: x509.MarshalPKCS1PrivateKey(userKey),
 		})
 
-		acmeClient, acmeClientMutex, err = p.newACMEClient(&acmeUserInfo, cert.Spec.Provider)
+		log.Printf("Creating ACME client for %v provider for %v", provider, cert.Spec.Domain)
+		acmeClient, acmeClientMutex, err = p.newACMEClient(&acmeUserInfo, provider)
 		if err != nil {
 			return false, errors.Wrapf(err, "Error while creating ACME client for %v", cert.Spec.Domain)
 		}
@@ -606,14 +594,8 @@ func ingressCertificates(p *CertProcessor, ingress v1beta1.Ingress) []Certificat
 		return nil
 	}
 	var certs []Certificate
-	provider := ingress.Annotations[annotationNamespace+".provider"]
-	email := ingress.Annotations[annotationNamespace+".email"]
-	if provider == "" {
-		provider = p.defaultProvider
-	}
-	if email == "" {
-		email = p.defaultEmail
-	}
+	provider := valueOrDefault(ingress.Annotations[annotationNamespace+".provider"], p.defaultProvider)
+	email := valueOrDefault(ingress.Annotations[annotationNamespace+".email"], p.defaultEmail)
 	if provider == "" || email == "" {
 		return nil
 	}
@@ -649,14 +631,8 @@ func (p *CertProcessor) processIngress(ingress v1beta1.Ingress) {
 		Component: "kube-cert-manager",
 	}
 	var certs []Certificate
-	provider := ingress.Annotations[annotationNamespace+".provider"]
-	email := ingress.Annotations[annotationNamespace+".email"]
-	if provider == "" {
-		provider = p.defaultProvider
-	}
-	if email == "" {
-		email = p.defaultEmail
-	}
+	provider := valueOrDefault(ingress.Annotations[annotationNamespace+".provider"], p.defaultProvider)
+	email := valueOrDefault(ingress.Annotations[annotationNamespace+".email"], p.defaultEmail)
 	for i, tls := range ingress.Spec.TLS {
 		if len(tls.Hosts) == 0 {
 			continue
@@ -741,8 +717,12 @@ func certificateNamespace(c Certificate) string {
 	return "default"
 }
 
-func addLabelSelector(p *CertProcessor, endpoint string) (string, error) {
-	return addURLArgument(endpoint, "labelSelector", createLabelSelector(p))
+func addLabelSelector(p *CertProcessor, endpoint string) string {
+	result, err := addURLArgument(endpoint, "labelSelector", createLabelSelector(p))
+	if err != nil {
+		log.Fatalf("Error adding label selector to '%v': %v", endpoint, err)
+	}
+	return result
 }
 
 func createLabelSelector(p *CertProcessor) string {
@@ -750,4 +730,11 @@ func createLabelSelector(p *CertProcessor) string {
 		return labelNamespace + ".class=" + p.class
 	}
 	return ""
+}
+
+func valueOrDefault(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
