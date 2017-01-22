@@ -20,6 +20,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,8 +48,10 @@ import (
 
 // CertProcessor holds the shared configuration, state, and locks
 type CertProcessor struct {
-	certSecretPrefix string
 	acmeURL          string
+	certSecretPrefix string
+	certNamespace    string
+	tagPrefix        string
 	namespaces       []string
 	class            string
 	defaultProvider  string
@@ -63,6 +66,8 @@ type CertProcessor struct {
 func NewCertProcessor(
 	acmeURL string,
 	certSecretPrefix string,
+	certNamespace string,
+	tagPrefix string,
 	namespaces []string,
 	class string,
 	defaultProvider string,
@@ -71,6 +76,8 @@ func NewCertProcessor(
 	return &CertProcessor{
 		acmeURL:          acmeURL,
 		certSecretPrefix: certSecretPrefix,
+		certNamespace:    certNamespace,
+		tagPrefix:        tagPrefix,
 		namespaces:       namespaces,
 		class:            class,
 		defaultProvider:  defaultProvider,
@@ -188,13 +195,13 @@ func (p *CertProcessor) getCertificates() ([]Certificate, error) {
 	var certificates []Certificate
 	if len(p.namespaces) == 0 {
 		var err error
-		certificates, err = getCertificates(addLabelSelector(p, certEndpointAll))
+		certificates, err = getCertificates(addLabelSelector(p, namespacedAllCertEndpoint(certEndpointAll, p.certNamespace)))
 		if err != nil {
 			return nil, errors.Wrap(err, "Error while fetching certificate list")
 		}
 	} else {
 		for _, namespace := range p.namespaces {
-			certs, err := getCertificates(addLabelSelector(p, namespacedEndpoint(certEndpoint, namespace)))
+			certs, err := getCertificates(addLabelSelector(p, namespacedCertEndpoint(certEndpoint, p.certNamespace, namespace)))
 			if err != nil {
 				return nil, errors.Wrap(err, "Error while fetching certificate list")
 			}
@@ -249,6 +256,8 @@ func (p *CertProcessor) syncIngresses() error {
 }
 
 func (p *CertProcessor) watchKubernetesEvents(certEndpoint, ingressEndpoint string, wg *sync.WaitGroup, doneChan <-chan struct{}) {
+	log.Printf("Watching %s", certEndpoint)
+	log.Printf("Watching %s", ingressEndpoint)
 	certEvents, certErrs := monitorCertificateEvents(certEndpoint)
 	ingressEvents, ingressErrs := monitorIngressEvents(ingressEndpoint)
 	watchErrs := make(chan error)
@@ -342,8 +351,8 @@ func (p *CertProcessor) processCertificate(cert Certificate) (processed bool, er
 	}
 
 	// If a cert exists, check its expiry
-	if s != nil && getDomainLabel(s) == cert.Spec.Domain {
-		acmeCert, err = NewACMECertDataFromSecret(s)
+	if s != nil && getDomainFromLabel(s, p.tagPrefix) == cert.Spec.Domain {
+		acmeCert, err = NewACMECertDataFromSecret(s, p.tagPrefix)
 		if err != nil {
 			return false, errors.Wrapf(err, "Error while decoding acme certificate from secret for existing domain %v", cert.Spec.Domain)
 		}
@@ -490,8 +499,14 @@ func (p *CertProcessor) processCertificate(cert Certificate) (processed bool, er
 
 	// Convert cert data to k8s secret
 	isUpdate := s != nil
-	s = acmeCert.ToSecret(p.class)
+	s = acmeCert.ToSecret(p.tagPrefix, p.class)
 	s.Name = p.secretName(cert)
+
+	if isUpdate {
+		log.Printf("Updating secret %v in namespace %v for domain %v", s.Name, namespace, cert.Spec.Domain)
+	} else {
+		log.Printf("Creating secret %v in namespace %v for domain %v", s.Name, namespace, cert.Spec.Domain)
+	}
 
 	// Save the k8s secret
 	if err := saveSecret(namespace, s, isUpdate); err != nil {
@@ -565,7 +580,8 @@ func (p *CertProcessor) gcSecrets() error {
 		usedSecrets[cert.Namespace+" "+p.secretName(cert)] = true
 	}
 	for _, secret := range secrets {
-		if secret.Annotations[annotationNamespace] != "true" {
+		// Only check for the deprecated "enabled" annotation if not using the "class" feature
+		if p.class == "" && secret.Annotations[addTagPrefix(p.tagPrefix, "enabled")] != "true" {
 			continue
 		}
 		if usedSecrets[secret.Namespace+" "+secret.Name] {
@@ -590,12 +606,12 @@ func (p *CertProcessor) processIngressEvent(c IngressEvent) {
 
 func ingressCertificates(p *CertProcessor, ingress v1beta1.Ingress) []Certificate {
 	// The enabled annotation is deprecated when a class label is used
-	if p.class == "" && ingress.Annotations[annotationNamespace+".enabled"] != "true" {
+	if p.class == "" && ingress.Annotations[addTagPrefix(p.tagPrefix, "enabled")] != "true" {
 		return nil
 	}
 	var certs []Certificate
-	provider := valueOrDefault(ingress.Annotations[annotationNamespace+".provider"], p.defaultProvider)
-	email := valueOrDefault(ingress.Annotations[annotationNamespace+".email"], p.defaultEmail)
+	provider := valueOrDefault(ingress.Annotations[addTagPrefix(p.tagPrefix, "provider")], p.defaultProvider)
+	email := valueOrDefault(ingress.Annotations[addTagPrefix(p.tagPrefix, "email")], p.defaultEmail)
 	if provider == "" || email == "" {
 		return nil
 	}
@@ -624,15 +640,15 @@ func ingressCertificates(p *CertProcessor, ingress v1beta1.Ingress) []Certificat
 }
 
 func (p *CertProcessor) processIngress(ingress v1beta1.Ingress) {
-	if p.class == "" && ingress.Annotations[annotationNamespace+".enabled"] != "true" {
+	if p.class == "" && ingress.Annotations[addTagPrefix(p.tagPrefix, "enabled")] != "true" {
 		return
 	}
 	source := v1.EventSource{
 		Component: "kube-cert-manager",
 	}
 	var certs []Certificate
-	provider := valueOrDefault(ingress.Annotations[annotationNamespace+".provider"], p.defaultProvider)
-	email := valueOrDefault(ingress.Annotations[annotationNamespace+".email"], p.defaultEmail)
+	provider := valueOrDefault(ingress.Annotations[addTagPrefix(p.tagPrefix, "provider")], p.defaultProvider)
+	email := valueOrDefault(ingress.Annotations[addTagPrefix(p.tagPrefix, "email")], p.defaultEmail)
 	for i, tls := range ingress.Spec.TLS {
 		if len(tls.Hosts) == 0 {
 			continue
@@ -718,18 +734,31 @@ func certificateNamespace(c Certificate) string {
 }
 
 func addLabelSelector(p *CertProcessor, endpoint string) string {
-	result, err := addURLArgument(endpoint, "labelSelector", createLabelSelector(p))
-	if err != nil {
-		log.Fatalf("Error adding label selector to '%v': %v", endpoint, err)
+	if p.class != "" {
+		result, err := addURLArgument(endpoint, "labelSelector", createLabelSelector(p))
+		if err != nil {
+			log.Fatalf("Error adding label selector to '%v': %v", endpoint, err)
+		}
+		return result
 	}
-	return result
+	return endpoint
 }
 
 func createLabelSelector(p *CertProcessor) string {
 	if p.class != "" {
-		return labelNamespace + ".class=" + p.class
+		return addTagPrefix(p.tagPrefix, "class") + "=" + p.class
 	}
 	return ""
+}
+
+func addTagPrefix(prefix, tag string) string {
+	if prefix == "" {
+		return tag
+	} else if strings.HasSuffix(prefix, ".") {
+		// Support the deprecated "stable.k8s.psg.io/kcm." prefix
+		return prefix + tag
+	}
+	return prefix + "/" + tag
 }
 
 func valueOrDefault(a, b string) string {
