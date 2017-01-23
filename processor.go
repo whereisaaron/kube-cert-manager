@@ -107,11 +107,11 @@ func (p *CertProcessor) newACMEClient(acmeUser acme.User, provider string) (*acm
 
 	switch provider {
 	case "http":
-		acmeClient.SetHTTPAddress("8080")
+		acmeClient.SetHTTPAddress(":8080")
 		acmeClient.ExcludeChallenges([]acme.Challenge{acme.DNS01, acme.TLSSNI01})
 		return acmeClient, &p.HTTPLock, nil
 	case "tls":
-		acmeClient.SetTLSAddress("8081")
+		acmeClient.SetTLSAddress(":8081")
 		acmeClient.ExcludeChallenges([]acme.Challenge{acme.HTTP01, acme.DNS01})
 		return acmeClient, &p.TLSLock, nil
 	case "cloudflare":
